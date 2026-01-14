@@ -18,6 +18,8 @@
 #include "obs-ffmpeg-mux.h"
 #include "obs-ffmpeg-formats.h"
 
+#include <inttypes.h>
+
 #ifdef _WIN32
 #include "util/windows/win-version.h"
 #endif
@@ -1278,7 +1280,7 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
   
   // Calculate target time as offset BACK from the end
   int64_t target_time = end_time - ((int64_t)offset_seconds * 1000000LL);
-  info("end_time %lld usec, target_time %lld usec (offset back %d seconds)", 
+  info("end_time %" PRId64 " usec, target_time %" PRId64 " usec (offset back %d seconds)", 
       end_time, target_time, offset_seconds);
   
   // Find the nearest keyframe to our target time
