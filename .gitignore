@@ -32,6 +32,8 @@
 !INSTALL
 !README.rst
 !Dockerfile
+!Dockerfile.pkg
+!PKGBUILD
 
 # Exclude lock files
 *.lock.json
