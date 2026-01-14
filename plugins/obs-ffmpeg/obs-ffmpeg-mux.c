@@ -1421,7 +1421,7 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 
 static void deactivate_replay_buffer(struct ffmpeg_muxer *stream, int code)
 {
-	// Handle continuous recording state specially
+	// Handle continuous recording state
 	if (stream->replay_to_rec_state == WRITING) {
 		info("stopping continuous recording, closing pipe properly");
 
@@ -1431,11 +1431,20 @@ static void deactivate_replay_buffer(struct ffmpeg_muxer *stream, int code)
 			stream->pipe = NULL;
 		}
 
-	// Wait for any ongoing mux thread to complete
+		// Wait for any ongoing mux thread to complete first
 		if (stream->mux_thread_joinable) {
 			pthread_join(stream->mux_thread, NULL);
 			stream->mux_thread_joinable = false;
 		}
+
+		// Clear muxing flag before emitting saved signal
+		os_atomic_set_bool(&stream->muxing, false);
+
+		// Emit saved signal so frontend knows file is ready
+		calldata_t cd = {0};
+		signal_handler_t *sh = obs_output_get_signal_handler(stream->output);
+		signal_handler_signal(sh, "saved", &cd);
+		calldata_free(&cd);
 	}
 
 	if (code) {
@@ -1447,7 +1456,7 @@ static void deactivate_replay_buffer(struct ffmpeg_muxer *stream, int code)
 	os_atomic_set_bool(&stream->active, false);
 	os_atomic_set_bool(&stream->sent_headers, false);
 	os_atomic_set_bool(&stream->stopping, false);
-  os_atomic_set_bool(&stream->muxing, false);
+	// Don't set muxing to false here - already done above before signal
 
 	replay_buffer_clear(stream);
 }
