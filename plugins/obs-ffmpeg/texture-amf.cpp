@@ -1157,6 +1157,7 @@ static void check_texture_encode_capability(obs_encoder_t *encoder, amf_codec_ty
 }
 
 #include "texture-amf-opts.hpp"
+#include <filesystem>
 
 /* These are initial recommended settings that may be lowered later once we know more info such as the resolution and
  * frame rate. */
@@ -2552,8 +2553,16 @@ try {
 
 	/* ----------------------------------- */
 	/* Check for supported codecs          */
+	const char* exe = os_get_executable_path_ptr("obs-amf-test.exe");
+	bool exists = std::filesystem::exists(exe);
 
-	BPtr<char> test_exe = os_get_executable_path_ptr("obs-amf-test.exe");
+	if (!exists) {
+		blog(LOG_INFO, "Did not find AMF test exe, fallback to PATH search");
+    exe = "obs-amf-test.exe";
+	}
+
+	BPtr<char> test_exe = bstrdup(exe);
+
 	std::stringstream cmd;
 	std::string caps_str;
 

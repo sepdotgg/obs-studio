@@ -159,6 +159,14 @@ static bool enum_luids(void *param, uint32_t idx, uint64_t luid)
 void check_adapters(struct adapter_info *adapters, size_t *adapter_count)
 {
 	char *test_exe = os_get_executable_path_ptr("obs-qsv-test.exe");
+  bool exists = os_file_exists(test_exe);
+
+  if (!exists) {
+		blog(LOG_INFO, "Did not find QSV test exe, fallback to PATH search");
+    bfree(test_exe);
+    test_exe = bstrdup("obs-qsv-test.exe");
+	}
+
 	struct dstr cmd = {0};
 	struct dstr caps_str = {0};
 	os_process_pipe_t *pp = nullptr;
