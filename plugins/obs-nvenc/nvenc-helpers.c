@@ -289,6 +289,13 @@ static bool nvenc_check(void)
 {
 #ifdef _WIN32
 	char *test_exe = os_get_executable_path_ptr("obs-nvenc-test.exe");
+  bool exists = os_file_exists(test_exe);
+
+  if (!exists) {
+		blog(LOG_INFO, "Did not find NVENC test exe, fallback to PATH search");
+    bfree(test_exe);
+    test_exe = bstrdup("obs-nvenc-test.exe");
+	}
 #else
 	char *test_exe = os_get_executable_path_ptr("obs-nvenc-test");
 #endif
