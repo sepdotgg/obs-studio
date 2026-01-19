@@ -425,7 +425,7 @@ void obs_encoder_destroy(obs_encoder_t *encoder)
 		}
 		da_free(encoder->outputs);
 		pthread_mutex_unlock(&encoder->outputs_mutex);
-
+		
 		blog(LOG_DEBUG, "encoder '%s' destroyed", encoder->context.name);
 
 		obs_encoder_set_group(encoder, NULL);

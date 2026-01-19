@@ -132,6 +132,39 @@ static void *ffmpeg_mux_create(obs_data_t *settings, obs_output_t *output)
 #define FFMPEG_MUX "obs-ffmpeg-mux"
 #endif
 
+// TODO: [linux-port] posix_spawn doesn't search PATH, so we need to resolve it ourselves
+#ifndef _WIN32
+#include <sys/stat.h>
+static char *find_executable_in_path(const char *name)
+{
+	const char *path_env = getenv("PATH");
+	if (!path_env || !name)
+		return NULL;
+
+	char *path_copy = bstrdup(path_env);
+	char *saveptr = NULL;
+	char *dir = strtok_r(path_copy, ":", &saveptr);
+
+	while (dir) {
+		struct dstr full_path = {0};
+		dstr_printf(&full_path, "%s/%s", dir, name);
+
+		struct stat st;
+		if (stat(full_path.array, &st) == 0 && (st.st_mode & S_IXUSR)) {
+			bfree(path_copy);
+			return full_path.array;
+		}
+
+		dstr_free(&full_path);
+		dir = strtok_r(NULL, ":", &saveptr);
+	}
+
+	bfree(path_copy);
+	return NULL;
+}
+#endif
+// TODO: [linux-port] END
+
 static inline bool capturing(struct ffmpeg_muxer *stream)
 {
 	return os_atomic_load_bool(&stream->capturing);
@@ -300,7 +333,21 @@ static void build_command_line(struct ffmpeg_muxer *stream, os_process_args_t **
     *args = os_process_args_create(exe);
 	} else {
     blog(LOG_INFO, "Did not find FFMPEG_MUX exe, fallback to PATH search");
+    // TODO: [linux-port] posix_spawn doesn't search PATH, resolve it here
+#ifndef _WIN32
+    char *path_exe = find_executable_in_path(FFMPEG_MUX);
+    if (path_exe) {
+      blog(LOG_INFO, "Found FFMPEG_MUX in PATH: %s", path_exe);
+      *args = os_process_args_create(path_exe);
+      bfree(path_exe);
+    } else {
+      blog(LOG_WARNING, "Could not find %s in PATH", FFMPEG_MUX);
+      *args = os_process_args_create(FFMPEG_MUX);
+    }
+#else
     *args = os_process_args_create(FFMPEG_MUX);
+#endif
+    // TODO: [linux-port] END
   }
 
   bfree(exe);
