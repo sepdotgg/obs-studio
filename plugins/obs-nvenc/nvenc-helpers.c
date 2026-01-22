@@ -7,6 +7,39 @@
 #include <util/dstr.h>
 #include <util/pipe.h>
 
+// TODO: [linux-port] PATH search for nvenc test binary
+#ifndef _WIN32
+#include <sys/stat.h>
+static char *find_executable_in_path(const char *name)
+{
+	const char *path_env = getenv("PATH");
+	if (!path_env || !name)
+		return NULL;
+
+	char *path_copy = bstrdup(path_env);
+	char *saveptr = NULL;
+	char *dir = strtok_r(path_copy, ":", &saveptr);
+
+	while (dir) {
+		struct dstr full_path = {0};
+		dstr_printf(&full_path, "%s/%s", dir, name);
+
+		struct stat st;
+		if (stat(full_path.array, &st) == 0 && (st.st_mode & S_IXUSR)) {
+			bfree(path_copy);
+			return full_path.array;
+		}
+
+		dstr_free(&full_path);
+		dir = strtok_r(NULL, ":", &saveptr);
+	}
+
+	bfree(path_copy);
+	return NULL;
+}
+#endif
+// TODO: [linux-port] END
+
 static void *nvenc_lib = NULL;
 static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
 NV_ENCODE_API_FUNCTION_LIST nv = {NV_ENCODE_API_FUNCTION_LIST_VER};
@@ -298,6 +331,23 @@ static bool nvenc_check(void)
 	}
 #else
 	char *test_exe = os_get_executable_path_ptr("obs-nvenc-test");
+	
+	// TODO: [linux-port] posix_spawn doesn't search in path, resolve here
+	bool exists = os_file_exists(test_exe);
+
+  	if (!exists) {
+		blog(LOG_INFO, "Did not find NVENC test exe, fallback to PATH search");
+    	// TODO: [linux-port] posix_spawn doesn't search PATH, resolve it here
+    	char *path_exe = find_executable_in_path("obs-nvenc-test");
+    	if (path_exe) {
+      		blog(LOG_INFO, "Found obs-nvenc-test in PATH: %s", path_exe);
+      		bfree(test_exe);
+      		test_exe = path_exe;
+    		} else {
+      		blog(LOG_WARNING, "Could not find obs-nvenc-test in PATH");
+    	}
+	}
+	// TODO: [linux-port] END
 #endif
 	os_process_args_t *args;
 	struct dstr caps_str = {0};
