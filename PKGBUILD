@@ -56,6 +56,7 @@ build() {
         -DOBS_VERSION_OVERRIDE="$pkgver" \
         -DCALM_DEPRECATION=ON \
         -DENABLE_WEBSOCKET=ON \
+        -DUSE_STB_IMAGE_LOADER=ON \
         -Wno-dev
     cmake --build build --parallel
 }
