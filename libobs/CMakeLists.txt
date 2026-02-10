@@ -7,11 +7,6 @@ if(OS_WINDOWS AND NOT OBS_PARENT_ARCHITECTURE STREQUAL CMAKE_VS_PLATFORM_NAME)
   return()
 endif()
 
-# Option to use stb_image instead of FFmpeg for static image loading.
-# This is useful when FFmpeg's image decoders are not available (e.g., Electron's FFmpeg).
-# Note: avcodec is still required for media remuxing regardless of this option.
-option(USE_STB_IMAGE_LOADER "Use stb_image instead of FFmpeg for image loading" OFF)
-
 find_package(SIMDe REQUIRED)
 find_package(Threads REQUIRED)
 
@@ -186,7 +181,7 @@ target_sources(
     graphics/effect-parser.h
     graphics/effect.c
     graphics/effect.h
-    $<IF:$<BOOL:${USE_STB_IMAGE_LOADER}>,graphics/graphics-stb.c,graphics/graphics-ffmpeg.c>
+    graphics/graphics-ffmpeg.c
     graphics/graphics-imports.c
     graphics/graphics-internal.h
     graphics/graphics.c
