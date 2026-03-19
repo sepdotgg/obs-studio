@@ -1,60 +1,54 @@
 FROM archlinux:latest
 
 # Update system and install build dependencies
+# Covers PKGBUILD depends + makedepends + implicit build-time requirements
 RUN pacman -Syu --noconfirm && pacman -S --noconfirm \
     # Build tools
     base-devel \
     cmake \
-    ninja \
     git \
     extra-cmake-modules \
     fakeroot \
-    # Core dependencies
+    # PKGBUILD depends
     ffmpeg \
     jansson \
-    curl \
-    zlib \
-    mbedtls \
-    # Qt6
-    qt6-base \
-    qt6-svg \
-    qt6-wayland \
-    # Audio
-    pulseaudio \
-    pipewire \
-    jack2 \
-    alsa-lib \
-    sndio \
-    libfdk-aac \
-    speexdsp \
-    # Video
-    libva \
-    libdrm \
-    x264 \
-    vlc \
-    libxcomposite \
     libxinerama \
     libxkbcommon-x11 \
-    v4l-utils \
-    ffnvcodec-headers \
-    # Scripting
-    luajit \
-    python \
-    swig \
-    # Misc
-    pciutils \
-    librist \
-    srt \
-    websocketpp \
-    asio \
-    nlohmann-json \
-    qrencode \
-    qrcodegencpp-cmake \
-    freetype2 \
+    mbedtls \
     rnnoise \
+    pciutils \
+    qt6-svg \
+    curl \
+    jack2 \
+    gtk-update-icon-cache \
+    pipewire \
+    libxcomposite \
     libdatachannel \
     uthash \
     simde \
+    qrcodegencpp-cmake \
+    python \
+    # PKGBUILD makedepends
+    libfdk-aac \
+    x264 \
+    swig \
+    luajit \
+    sndio \
+    nlohmann-json \
+    ffnvcodec-headers \
+    websocketpp \
+    asio \
+    # Implicit build-time deps (found via cmake find_package)
+    alsa-lib \
+    freetype2 \
+    libdrm \
+    libva \
+    pulseaudio \
+    v4l-utils \
+    wayland \
+    zlib \
+    qt6-base \
+    qt6-wayland \
     && pacman -Scc --noconfirm
 
 # Create build user (makepkg won't run as root)
