@@ -1350,7 +1350,7 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
   if (found_keyframe) {
     skip_packets = best_keyframe_idx;
     struct encoder_packet *best_pkt = deque_data(&stream->packets, best_keyframe_idx * size);
-    info("Selected keyframe at packet %zu: DTS=%ld (%.1f seconds from end)", 
+    info("Selected keyframe at packet %zu: DTS=%" PRId64 " (%.1f seconds from end)", 
         best_keyframe_idx, best_pkt->dts_usec, 
         (double)(end_time - best_pkt->dts_usec) / 1000000.0);
   } else {
