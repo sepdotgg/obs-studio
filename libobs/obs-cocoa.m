@@ -47,6 +47,9 @@ void add_default_module_paths(void)
 char *find_libobs_data_file(const char *file)
 {
     NSBundle *frameworkBundle = [NSBundle bundleWithIdentifier:@"com.obsproject.libobs"];
+    if (!frameworkBundle)
+        return NULL;
+
     NSString *libobsDataPath =
         [[[frameworkBundle bundleURL] path] stringByAppendingFormat:@"/%@/%s", @"Resources", file];
     size_t path_length = strlen(libobsDataPath.UTF8String);
