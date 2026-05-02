@@ -21,6 +21,7 @@
 #include "obs-nix-platform.h"
 #include "obs-nix-x11.h"
 
+#include <stdlib.h>
 #include <xcb/xcb.h>
 #if defined(XCB_XINPUT_FOUND)
 #include <xcb/xinput.h>
@@ -844,8 +845,11 @@ static bool obs_nix_x11_hotkeys_platform_init(struct obs_core_hotkeys *hotkeys)
 {
 	// Open a new X11 connection here, this avoids Qt masking events we care about.
 	Display *display = XOpenDisplay(NULL);
-	if (!display)
+	if (!display) {
+		blog(LOG_ERROR, "DIAG hotkeys_platform_init: XOpenDisplay failed (DISPLAY=%s)", getenv("DISPLAY") ? getenv("DISPLAY") : "(null)");
 		return false;
+	}
+	blog(LOG_INFO, "DIAG hotkeys_platform_init: XOpenDisplay succeeded");
 
 	hotkeys->platform_context = bzalloc(sizeof(obs_hotkeys_platform_t));
 	hotkeys->platform_context->display = display;
