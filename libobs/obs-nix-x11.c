@@ -846,7 +846,27 @@ static bool obs_nix_x11_hotkeys_platform_init(struct obs_core_hotkeys *hotkeys)
 	// Open a new X11 connection here, this avoids Qt masking events we care about.
 	Display *display = XOpenDisplay(NULL);
 	if (!display) {
-		blog(LOG_ERROR, "DIAG hotkeys_platform_init: XOpenDisplay failed (DISPLAY=%s)", getenv("DISPLAY") ? getenv("DISPLAY") : "(null)");
+		const char *dpy_env = getenv("DISPLAY");
+		/* xcb_connect never returns NULL -- probe it for the real error code */
+		xcb_connection_t *c = xcb_connect(dpy_env, NULL);
+		int xcb_err = xcb_connection_has_error(c);
+		xcb_disconnect(c);
+		const char *reason;
+		switch (xcb_err) {
+		case 0:                                reason = "no error (transient?)"; break;
+		case XCB_CONN_ERROR:                   reason = "socket/pipe/stream error"; break;
+		case XCB_CONN_CLOSED_EXT_NOTSUPPORTED: reason = "extension not supported"; break;
+		case XCB_CONN_CLOSED_MEM_INSUFFICIENT: reason = "insufficient memory"; break;
+		case XCB_CONN_CLOSED_REQ_LEN_EXCEED:   reason = "request length exceeded"; break;
+		case XCB_CONN_CLOSED_PARSE_ERR:        reason = "display string parse error"; break;
+		case XCB_CONN_CLOSED_INVALID_SCREEN:   reason = "invalid screen"; break;
+		case XCB_CONN_CLOSED_FDPASSING_FAILED: reason = "FD passing failed"; break;
+		default:                               reason = "unknown"; break;
+		}
+		blog(LOG_ERROR,
+		     "DIAG hotkeys_platform_init: XOpenDisplay failed "
+		     "(DISPLAY=%s, xcb_error=%d: %s)",
+		     dpy_env ? dpy_env : "(null)", xcb_err, reason);
 		return false;
 	}
 	blog(LOG_INFO, "DIAG hotkeys_platform_init: XOpenDisplay succeeded");
