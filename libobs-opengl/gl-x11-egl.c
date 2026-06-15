@@ -74,6 +74,7 @@ struct gl_windowinfo {
 	 */
 	xcb_window_t window;
 	EGLSurface surface;
+	xcb_colormap_t colormap;
 };
 
 struct gl_platform {
@@ -246,7 +247,7 @@ static void gl_context_destroy(struct gl_platform *plat)
 static struct gl_windowinfo *gl_x11_egl_windowinfo_create(const struct gs_init_data *info)
 {
 	UNUSED_PARAMETER(info);
-	return bmalloc(sizeof(struct gl_windowinfo));
+	return bzalloc(sizeof(struct gl_windowinfo));
 }
 
 static void gl_x11_egl_windowinfo_destroy(struct gl_windowinfo *info)
@@ -404,6 +405,7 @@ static bool gl_x11_egl_platform_init_swapchain(struct gs_swap_chain *swap)
 	uint32_t mask_values[] = {0, colormap, 0};
 
 	xcb_create_colormap(xcb_conn, XCB_COLORMAP_ALLOC_NONE, colormap, parent, visual);
+	swap->wi->colormap = colormap;
 
 	xcb_void_cookie_t window_cookie = xcb_create_window_checked(xcb_conn, 24 /* Hardcoded? */, wid, parent, 0, 0,
 								    geometry->width, geometry->height, 0, 0, visual,
@@ -443,8 +445,17 @@ success:
 
 static void gl_x11_egl_platform_cleanup_swapchain(struct gs_swap_chain *swap)
 {
-	UNUSED_PARAMETER(swap);
-	/* Really nothing to clean up? */
+	const struct gl_platform *plat = swap->device->plat;
+	xcb_connection_t *xcb_conn = XGetXCBConnection(plat->xdisplay);
+
+	if (swap->wi->surface != EGL_NO_SURFACE)
+		eglDestroySurface(plat->edisplay, swap->wi->surface);
+	if (swap->wi->window)
+		xcb_destroy_window(xcb_conn, swap->wi->window);
+	if (swap->wi->colormap)
+		xcb_free_colormap(xcb_conn, swap->wi->colormap);
+
+	xcb_flush(xcb_conn);
 }
 
 static void gl_x11_egl_device_enter_context(gs_device_t *device)
