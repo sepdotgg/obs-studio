@@ -57,7 +57,7 @@ static inline void replay_buffer_clear(struct ffmpeg_muxer *stream)
 	}
 
 	deque_free(&stream->packets);
-	
+
 	while (stream->continuous_packets.size > 0) {
 		struct encoder_packet pkt;
 		deque_pop_front(&stream->continuous_packets, &pkt, sizeof(pkt));
@@ -65,7 +65,7 @@ static inline void replay_buffer_clear(struct ffmpeg_muxer *stream)
 	}
 
 	deque_free(&stream->continuous_packets);
-	
+
 	stream->cur_size = 0;
 	stream->cur_time = 0;
 	stream->max_size = 0;
@@ -1018,6 +1018,8 @@ static void convert_replay_to_recording_with_offset_proc(void *data, calldata_t 
 		return;
 	}
 
+	os_atomic_set_bool(&stream->stop_recording_requested, false);
+
 	int offset_seconds = (int)calldata_int(cd, "offset_seconds");
 	info("Converting replay to recording with offset_seconds: %d", offset_seconds);
 
@@ -1033,6 +1035,8 @@ static void get_last_replay(void *data, calldata_t *cd)
 		calldata_set_string(cd, "path", stream->path.array);
 }
 
+static void stop_recording_proc(void *data, calldata_t *cd);
+
 static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 {
 	UNUSED_PARAMETER(settings);
@@ -1046,9 +1050,12 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 	proc_handler_add(ph, "void save()", save_replay_proc, stream);
 	proc_handler_add(ph, "void convert(int offset_seconds)", convert_replay_to_recording_with_offset_proc, stream);
 	proc_handler_add(ph, "void get_last_replay(out string path)", get_last_replay, stream);
+	proc_handler_add(ph, "void stop_recording()", stop_recording_proc, stream);
 
 	signal_handler_t *sh = obs_output_get_signal_handler(output);
 	signal_handler_add(sh, "void saved()");
+	signal_handler_add(sh, "void recording_started(string path, int code)");
+	signal_handler_add(sh, "void recording_stopped(string path)");
 
 	return stream;
 }
@@ -1225,6 +1232,78 @@ error:
 	return NULL;
 }
 
+static void emit_recording_started(struct ffmpeg_muxer *stream, int code)
+{
+	signal_handler_t *sh = obs_output_get_signal_handler(stream->output);
+	calldata_t cd = {0};
+	calldata_set_string(&cd, "path", code == 0 ? stream->path.array : "");
+	calldata_set_int(&cd, "code", code);
+	signal_handler_signal(sh, "recording_started", &cd);
+	calldata_free(&cd);
+}
+
+static void emit_recording_stopped(struct ffmpeg_muxer *stream)
+{
+	signal_handler_t *sh = obs_output_get_signal_handler(stream->output);
+	calldata_t cd = {0};
+	calldata_set_string(&cd, "path", stream->path.array);
+	signal_handler_signal(sh, "recording_stopped", &cd);
+	calldata_free(&cd);
+}
+
+static void replay_buffer_clear_continuous(struct ffmpeg_muxer *stream)
+{
+	while (stream->continuous_packets.size > 0) {
+		struct encoder_packet pkt;
+		deque_pop_front(&stream->continuous_packets, &pkt, sizeof(pkt));
+		obs_encoder_packet_release(&pkt);
+	}
+}
+
+static void drain_continuous_packets_to_pipe(struct ffmpeg_muxer *stream)
+{
+	// Write any extra packets that have appeared in the meantime.
+	while (stream->continuous_packets.size > 0) {
+		struct encoder_packet pkt;
+		deque_pop_front(&stream->continuous_packets, &pkt, sizeof(pkt));
+
+		// Apply timestamp adjustments to buffered packets too
+		if (pkt.type == OBS_ENCODER_VIDEO) {
+			pkt.dts -= stream->video_pts_offset;
+			pkt.pts -= stream->video_pts_offset;
+		} else {
+			pkt.dts -= stream->audio_dts_offsets[pkt.track_idx];
+			pkt.pts -= stream->audio_dts_offsets[pkt.track_idx];
+		}
+
+		write_packet(stream, &pkt);
+		obs_encoder_packet_release(&pkt);
+	}
+}
+
+static void replay_buffer_insert(struct ffmpeg_muxer *stream,
+				 struct encoder_packet *packet,
+				 struct encoder_packet *pkt)
+{
+	replay_buffer_purge(stream, pkt);
+
+	if (!stream->packets.size)
+		stream->cur_time = pkt->dts_usec;
+
+	stream->cur_size += pkt->size;
+	deque_push_back(&stream->packets, packet, sizeof(*packet));
+
+	if (packet->type == OBS_ENCODER_VIDEO && packet->keyframe)
+		stream->keyframes++;
+}
+
+static void stop_recording_proc(void *data, calldata_t *cd)
+{
+	struct ffmpeg_muxer *stream = data;
+	os_atomic_set_bool(&stream->stop_recording_requested, true);
+	UNUSED_PARAMETER(cd);
+}
+
 static void *replay_to_recording_mux_thread(void *data)
 {
 	struct ffmpeg_muxer *stream = data;
@@ -1257,50 +1336,23 @@ static void *replay_to_recording_mux_thread(void *data)
 		obs_encoder_packet_release(pkt);
 	}
 
-	stream->replay_to_rec_state = WRITING;
-	
-	// Write any extra packets that have appeared in the meantime.
-	while (stream->continuous_packets.size > 0) {
-		struct encoder_packet pkt;
-		deque_pop_front(&stream->continuous_packets, &pkt, sizeof(pkt));
-		
-		// Apply timestamp adjustments to buffered packets too
-		if (pkt.type == OBS_ENCODER_VIDEO) {
-			pkt.dts -= stream->video_pts_offset;
-			pkt.pts -= stream->video_pts_offset;
-		} else {
-			pkt.dts -= stream->audio_dts_offsets[pkt.track_idx];
-			pkt.pts -= stream->audio_dts_offsets[pkt.track_idx];
-		}
-		
-		if (!write_packet(stream, &pkt)) {
-			warn("Could not write continuous packet for file '%s'", stream->path.array);
-			error = true;
-			obs_encoder_packet_release(&pkt);
-			goto error;
-		}
-
-		obs_encoder_packet_release(&pkt);
-	}
-	
 	da_free(stream->mux_packets);
 
 	// Keep the pipe open for continuous recording
 	// The main thread will continue writing via replay_buffer_data()
+	os_atomic_set_bool(&stream->muxing, false);
 	return NULL;
 
 error:
 	os_process_pipe_destroy(stream->pipe);
 	stream->pipe = NULL;
 
-	if (error) {
-		for (size_t i = 0; i < stream->mux_packets.num; i++)
-			obs_encoder_packet_release(&stream->mux_packets.array[i]);
-	}
+	for (size_t i = 0; i < stream->mux_packets.num; i++)
+		obs_encoder_packet_release(&stream->mux_packets.array[i]);
 
 	da_free(stream->mux_packets);
+	os_atomic_set_bool(&stream->convert_failed, true);
 	os_atomic_set_bool(&stream->muxing, false);
-	stream->replay_to_rec_state = BUFFERING;
 
 	return NULL;
 }
@@ -1309,29 +1361,30 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 {
 	const size_t size = sizeof(struct encoder_packet);
 	size_t num_packets = stream->packets.size / size;
-	
+
 	if (num_packets == 0) {
 		warn("No packets in replay buffer to save");
+		emit_recording_started(stream, OBS_OUTPUT_ERROR);
 		return;
 	}
-	
+
 	// Calculate how many packets to skip based on offset from END of buffer
 	size_t skip_packets = 0;
 
   // Get the timestamp of the last packet (end of buffer)
   struct encoder_packet *last_pkt = deque_data(&stream->packets, (num_packets - 1) * size);
   int64_t end_time = last_pkt->dts_usec;
-  
+
   // Calculate target time as offset BACK from the end
   int64_t target_time = end_time - ((int64_t)offset_seconds * 1000000LL);
-  info("end_time %" PRId64 " usec, target_time %" PRId64 " usec (offset back %d seconds)", 
+  info("end_time %" PRId64 " usec, target_time %" PRId64 " usec (offset back %d seconds)",
       end_time, target_time, offset_seconds);
-  
+
   // Find the nearest keyframe to our target time
   size_t best_keyframe_idx = 0;
   int64_t best_time_diff = INT64_MAX;
   bool found_keyframe = false;
-  
+
   for (size_t i = 0; i < num_packets; i++) {
     struct encoder_packet *pkt = deque_data(&stream->packets, i * size);
     bool video = pkt->type == OBS_ENCODER_VIDEO;
@@ -1346,12 +1399,12 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
       }
     }
   }
-  
+
   if (found_keyframe) {
     skip_packets = best_keyframe_idx;
     struct encoder_packet *best_pkt = deque_data(&stream->packets, best_keyframe_idx * size);
-    info("Selected keyframe at packet %zu: DTS=%" PRId64 " (%.1f seconds from end)", 
-        best_keyframe_idx, best_pkt->dts_usec, 
+    info("Selected keyframe at packet %zu: DTS=%" PRId64 " (%.1f seconds from end)",
+        best_keyframe_idx, best_pkt->dts_usec,
         (double)(end_time - best_pkt->dts_usec) / 1000000.0);
   } else {
     warn("No keyframes found after target time, starting from beginning");
@@ -1361,9 +1414,10 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 
 	if (packets_to_save == 0) {
 		warn("Offset too large, no packets to save");
+		emit_recording_started(stream, OBS_OUTPUT_ERROR);
 		return;
 	}
-	
+
 	da_reserve(stream->mux_packets, packets_to_save);
 
 	/* ---------------------------- */
@@ -1390,10 +1444,10 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 		}
 
 		insert_packet(
-			&stream->mux_packets, 
-			pkt, 
-			video_offset, 
-			audio_offsets, 
+			&stream->mux_packets,
+			pkt,
+			video_offset,
+			audio_offsets,
 			stream->video_pts_offset,
 			stream->audio_dts_offsets
 		);
@@ -1406,12 +1460,13 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 
 	os_atomic_set_bool(&stream->muxing, true);
 
-	stream->mux_thread_joinable = 
+	stream->mux_thread_joinable =
 		pthread_create(&stream->mux_thread, NULL, replay_to_recording_mux_thread, stream) == 0;
 	if (!stream->mux_thread_joinable) {
 		warn("Failed to create muxer thread");
 		os_atomic_set_bool(&stream->muxing, false);
 		stream->replay_to_rec_state = BUFFERING;
+		emit_recording_started(stream, OBS_OUTPUT_ERROR);
 	}
 }
 
@@ -1466,22 +1521,26 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 
 static void deactivate_replay_buffer(struct ffmpeg_muxer *stream, int code)
 {
-	// Handle continuous recording state specially
-	if (stream->replay_to_rec_state == WRITING) {
-		info("stopping continuous recording, closing pipe properly");
-
-		// Close the pipe properly to finalize the MP4 file
-		if (stream->pipe) {
-			os_process_pipe_destroy(stream->pipe);
-			stream->pipe = NULL;
-		}
+	bool had_recording = stream->replay_to_rec_state == WRITING ||
+			     stream->replay_to_rec_state == CONVERTING;
 
 	// Wait for any ongoing mux thread to complete
-		if (stream->mux_thread_joinable) {
-			pthread_join(stream->mux_thread, NULL);
-			stream->mux_thread_joinable = false;
-		}
+	if (stream->mux_thread_joinable) {
+		pthread_join(stream->mux_thread, NULL);
+		stream->mux_thread_joinable = false;
 	}
+
+	// Close the pipe properly to finalize the MP4 file
+	if (stream->pipe) {
+		os_process_pipe_destroy(stream->pipe);
+		stream->pipe = NULL;
+	}
+
+	if (had_recording)
+		emit_recording_stopped(stream);
+
+	stream->replay_to_rec = false;
+	stream->replay_to_rec_state = BUFFERING;
 
 	if (code) {
 		obs_output_signal_stop(stream->output, code);
@@ -1492,7 +1551,7 @@ static void deactivate_replay_buffer(struct ffmpeg_muxer *stream, int code)
 	os_atomic_set_bool(&stream->active, false);
 	os_atomic_set_bool(&stream->sent_headers, false);
 	os_atomic_set_bool(&stream->stopping, false);
-  os_atomic_set_bool(&stream->muxing, false);
+	os_atomic_set_bool(&stream->muxing, false);
 
 	replay_buffer_clear(stream);
 }
@@ -1527,7 +1586,7 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 
 		if (!stream->packets.size)
 			stream->cur_time = pkt.dts_usec;
-			
+
 		stream->cur_size += pkt.size;
 
 		deque_push_back(&stream->packets, packet, sizeof(*packet));
@@ -1543,7 +1602,7 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 					stream->mux_thread_joinable = false;
 				}
 				stream->save_ts = 0;
-				
+
 				if (stream->replay_to_rec) {
           info("Converting replay buffer");
 					replay_to_recording_save_with_offset(stream, stream->convert_offset_sec);
@@ -1558,9 +1617,48 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 	case CONVERTING:
 		// During replay save, buffer new packets for continuous recording
 		deque_push_back(&stream->continuous_packets, packet, sizeof(*packet));
+
+		// Mux thread done, join guarantees it no longer touches the pipe,
+		// making the encode thread the sole pipe writer from here on.
+		if (!os_atomic_load_bool(&stream->muxing)) {
+			if (stream->mux_thread_joinable) {
+				pthread_join(stream->mux_thread, NULL);
+				stream->mux_thread_joinable = false;
+			}
+
+			if (os_atomic_load_bool(&stream->convert_failed)) {
+				os_atomic_set_bool(&stream->convert_failed, false);
+				replay_buffer_clear_continuous(stream);
+				stream->replay_to_rec = false;
+				stream->replay_to_rec_state = BUFFERING;
+				ts_offset_clear(stream);
+				emit_recording_started(stream, OBS_OUTPUT_ERROR);
+				break;
+			}
+
+			drain_continuous_packets_to_pipe(stream);
+			stream->replay_to_rec_state = WRITING;
+			emit_recording_started(stream, 0);
+		}
 		break;
 
 	case WRITING:
+		// stop_recording_proc sets this from any thread; consumed here
+		// where the encode thread is the sole pipe owner.
+		if (os_atomic_load_bool(&stream->stop_recording_requested)) {
+			if (stream->pipe) {
+				os_process_pipe_destroy(stream->pipe);
+				stream->pipe = NULL;
+			}
+			os_atomic_set_bool(&stream->stop_recording_requested, false);
+			stream->replay_to_rec = false;
+			stream->replay_to_rec_state = BUFFERING;
+			ts_offset_clear(stream);
+			emit_recording_stopped(stream);
+			replay_buffer_insert(stream, packet, &pkt);
+			break;
+		}
+
 		// Direct write to continuous recording file
 		if (!stream->pipe) {
 			warn("failed to get pipe");
@@ -1568,12 +1666,8 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 			return;
 		}
 
-		bool video = pkt.type == OBS_ENCODER_VIDEO;
-		
 		// Apply the same timestamp adjustments that were used in the replay portion
-		if (video) {
-			int64_t video_offset = stream->video_pts_offset * 1000000 / pkt.timebase_den;
-			pkt.dts_usec -= video_offset;
+		if (pkt.type == OBS_ENCODER_VIDEO) {
 			pkt.dts -= stream->video_pts_offset;
 			pkt.pts -= stream->video_pts_offset;
 		} else {
