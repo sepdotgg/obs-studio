@@ -1026,6 +1026,12 @@ static void convert_replay_to_recording_with_offset_proc(void *data, calldata_t 
 	stream->replay_to_rec = true;
 	stream->convert_offset_sec = offset_seconds;
 	save_replay_proc(data, cd);
+
+	/* save_ts is wall-clock, but the trigger compares it to the encoder's
+	   media DTS, which advances per encoded frame and stalls under load.
+	   Fire the convert on the next buffered packet. */
+	if (stream->save_ts)
+		stream->save_ts = 1;
 }
 
 static void get_last_replay(void *data, calldata_t *cd)
