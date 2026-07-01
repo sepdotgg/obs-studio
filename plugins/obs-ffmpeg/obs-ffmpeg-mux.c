@@ -1149,16 +1149,23 @@ static inline void replay_buffer_purge(struct ffmpeg_muxer *stream, struct encod
 	if (stream->max_size) {
 		if (!stream->packets.size || stream->keyframes <= 2)
 			return;
-
-		while ((stream->cur_size + (int64_t)pkt->size) > stream->max_size)
+		// queue drained purge and stop before hitting an infinite loop
+		while ((stream->cur_size + (int64_t)pkt->size) > stream->max_size) {
+			if (!stream->packets.size || stream->keyframes <= 2)
+				return;
 			purge(stream);
+		}
 	}
 
 	if (!stream->packets.size || stream->keyframes <= 2)
 		return;
 
-	while ((pkt->dts_usec - stream->cur_time) > stream->max_time)
+	// queue drained purge and stop before hitting an infinite loop
+	while ((pkt->dts_usec - stream->cur_time) > stream->max_time) {
+		if (!stream->packets.size || stream->keyframes <= 2)
+			return;
 		purge(stream);
+	}
 }
 
 static void insert_packet(mux_packets_t *packets, struct encoder_packet *packet, int64_t video_offset,
@@ -1661,6 +1668,19 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 			stream->replay_to_rec_state = BUFFERING;
 			ts_offset_clear(stream);
 			emit_recording_stopped(stream);
+
+			// the recording left very old packets here
+			// drop them so the next purge doesn't spin trying to drain
+			while (stream->packets.size > 0) {
+				struct encoder_packet stale;
+				deque_pop_front(&stream->packets, &stale,
+						sizeof(stale));
+				obs_encoder_packet_release(&stale);
+			}
+			stream->cur_size = 0;
+			stream->cur_time = 0;
+			stream->keyframes = 0;
+
 			replay_buffer_insert(stream, packet, &pkt);
 			break;
 		}
