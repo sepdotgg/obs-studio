@@ -1466,7 +1466,10 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 		);
 	}
 
-	generate_filename(stream, &stream->path, true);
+	/* overwrite=false, back-to-back converts within the same second would
+	   otherwise generate the same filename and truncate the recording.
+	   find_best_filename dedupes with a " (N)" suffix. */
+	generate_filename(stream, &stream->path, false);
 
 	info("State is now: CONVERTING");
 	stream->replay_to_rec_state = CONVERTING;
