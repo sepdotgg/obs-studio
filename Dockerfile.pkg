@@ -42,6 +42,7 @@ RUN pacman -Syu --noconfirm && pacman -S --noconfirm \
     python \
     swig \
     # Misc
+    gtk-update-icon-cache \
     pciutils \
     librist \
     srt \
