@@ -1284,6 +1284,14 @@ static void *replay_to_recording_mux_thread(void *data)
 	
 	da_free(stream->mux_packets);
 
+  // Signal the converted event, we now have a file on disk that may
+  // be useful to clients so we should let them know.
+  calldata_t cd = {0};
+  signal_handler_t *sh = obs_output_get_signal_handler(stream->output);
+  calldata_set_string(&cd, "file", stream->path.array);
+  signal_handler_signal(sh, "converted", &cd);
+  calldata_free(&cd);
+
 	// Keep the pipe open for continuous recording
 	// The main thread will continue writing via replay_buffer_data()
 	return NULL;
@@ -1407,6 +1415,7 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 
 	stream->mux_thread_joinable = 
 		pthread_create(&stream->mux_thread, NULL, replay_to_recording_mux_thread, stream) == 0;
+
 	if (!stream->mux_thread_joinable) {
 		warn("Failed to create muxer thread");
 		os_atomic_set_bool(&stream->muxing, false);
