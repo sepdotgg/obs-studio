@@ -43,7 +43,6 @@ RUN pacman -Syu --noconfirm && pacman -S --noconfirm \
     swig \
     # Misc
     gtk-update-icon-cache \
-    pciutils \
     librist \
     srt \
     websocketpp \
@@ -57,6 +56,18 @@ RUN pacman -Syu --noconfirm && pacman -S --noconfirm \
     uthash \
     simde \
     && pacman -Scc --noconfirm
+
+# Downgrade pciutils to 3.12 (Arch ships 3.15). Building against 3.15 records
+# pci_fill_info@LIBPCI_3.15, which breaks SteamOS and other older distros.
+ARG PCIUTILS_PKG=pciutils-3.12.0-1-x86_64.pkg.tar.zst
+ARG PCIUTILS_SHA256=cd41ce7bb5597f50103e05400dcc3f7327c4dd77e4a8080cb7b710d99a0003f8
+RUN curl -fsSLo "/tmp/$PCIUTILS_PKG" \
+        "https://archive.archlinux.org/packages/p/pciutils/$PCIUTILS_PKG" \
+    && echo "$PCIUTILS_SHA256  /tmp/$PCIUTILS_PKG" | sha256sum -c - \
+    && pacman -U --noconfirm "/tmp/$PCIUTILS_PKG" \
+    && rm "/tmp/$PCIUTILS_PKG" \
+    && printf 'IgnorePkg = pciutils\n' >> /etc/pacman.conf \
+    && pkg-config --modversion libpci | grep -qx '3.12.0'
 
 # Create build user (makepkg won't run as root)
 RUN useradd -m builder && echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
@@ -72,5 +83,18 @@ USER builder
 
 # Build the package
 RUN makepkg -sf --noconfirm
+
+# Guard against regressing to a newer libpci ABI.
+RUN set -e; \
+    for f in /build/pkg/obs-studio-custom/usr/bin/obs \
+             /build/pkg/obs-studio-custom/usr/lib/obs-plugins/obs-ffmpeg.so; do \
+      test -f "$f" || { echo "FAIL: expected artifact missing: $f"; exit 1; }; \
+      if objdump -T "$f" | grep -qE 'LIBPCI_3\.(9|1[0-9])'; then \
+        echo "FAIL: $f references a libpci version newer than LIBPCI_3.8"; \
+        objdump -T "$f" | grep LIBPCI; \
+        exit 1; \
+      fi; \
+    done; \
+    echo "OK: libpci symbol versions are <= LIBPCI_3.8"
 
 CMD ["bash"]

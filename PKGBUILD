@@ -42,6 +42,8 @@ prepare() {
 
 build() {
     export CXXFLAGS+=" -Wno-error=deprecated-declarations"
+    # Avoid a host GLIBCXX since libstdc++ is not bundled.
+    export LDFLAGS+=" -static-libstdc++"
     cmake -S obs-studio -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr \
