@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
-if(NOT ENABLE_DECKLINK)
+if(NOT ENABLE_DECKLINK OR NOT ENABLE_FRONTEND)
   target_disable(decklink-output-ui)
   return()
 endif()

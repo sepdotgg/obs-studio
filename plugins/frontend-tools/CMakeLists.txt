@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
+if(NOT ENABLE_FRONTEND)
+  target_disable(frontend-tools)
+  return()
+endif()
+
 find_package(Qt6 REQUIRED Widgets)
 
 if(OS_LINUX OR OS_FREEBSD OR OS_OPENBSD)
