@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
+if(NOT ENABLE_OUTPUTS)
+  target_disable(rtmp-services)
+  return()
+endif()
+
 option(ENABLE_SERVICE_UPDATES "Checks for service updates" ON)
 
 set(

@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
+option(ENABLE_OUTPUTS "Enable RTMP/FLV/MP4 output plugin" ON)
+if(NOT ENABLE_OUTPUTS)
+  target_disable(obs-outputs)
+  return()
+endif()
+
 set(CMAKE_FIND_PACKAGE_PREFER_CONFIG TRUE)
 find_package(MbedTLS REQUIRED)
 set(CMAKE_FIND_PACKAGE_PREFER_CONFIG FALSE)
