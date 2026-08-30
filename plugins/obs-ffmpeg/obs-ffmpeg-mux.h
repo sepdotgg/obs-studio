@@ -39,7 +39,7 @@ struct ffmpeg_muxer {
 	mux_packets_t mux_packets;
 
 	/* replay buffer to recording */
-  bool replay_to_rec;
+	bool replay_to_rec;
 	int convert_offset_sec; /* seconds from start of replay buffer */
 	struct deque continuous_packets;
 
@@ -48,6 +48,13 @@ struct ffmpeg_muxer {
 		CONVERTING, // converting memory buffer to file
 		WRITING     // saving to file
 	} replay_to_rec_state;
+
+	/* Guards continuous_packets, replay_to_rec_state transitions, and pipe
+	 * writes during CONVERTING/WRITING so the mux thread (which keeps the
+	 * pipe open after conversion) and replay_buffer_data() (which may be
+	 * called concurrently from the video/audio delivery threads) never
+	 * write to the pipe or the deque at the same time. */
+	pthread_mutex_t replay_mutex;
 
 	/* handy variables for timestamp adjustments */
 	bool found_video;
