@@ -45,6 +45,12 @@ struct ffmpeg_muxer {
 	volatile bool stop_recording_requested;
 	volatile bool convert_failed;
 
+	/* UTC epoch nanos for the recording's first and last frame. Both come off
+	   the one offset, and a zero offset means we never got a clock. */
+	int64_t wall_mono_offset_ns;
+	int64_t first_frame_wall_ns;
+	int64_t last_frame_wall_ns;
+
 	enum {
 		BUFFERING,  // recording to memory buffer
 		CONVERTING, // converting memory buffer to file

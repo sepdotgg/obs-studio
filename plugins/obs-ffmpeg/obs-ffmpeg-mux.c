@@ -19,6 +19,7 @@
 #include "obs-ffmpeg-formats.h"
 
 #include <inttypes.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include "util/windows/win-version.h"
@@ -1060,8 +1061,8 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 
 	signal_handler_t *sh = obs_output_get_signal_handler(output);
 	signal_handler_add(sh, "void saved()");
-	signal_handler_add(sh, "void recording_started(string path, int code)");
-	signal_handler_add(sh, "void recording_stopped(string path)");
+	signal_handler_add(sh, "void recording_started(string path, int code, int first_frame_wall_ns)");
+	signal_handler_add(sh, "void recording_stopped(string path, int last_frame_wall_ns)");
 
 	return stream;
 }
@@ -1245,12 +1246,59 @@ error:
 	return NULL;
 }
 
+/* Encoder timestamps are on the os_gettime_ns monotonic clock, which means
+   nothing on its own. Pin it to the wall clock once per recording, because
+   re-sampling per frame lets a clock step land between the first and last frame
+   and stretch the span. */
+static void sample_wall_mono_offset(struct ffmpeg_muxer *stream)
+{
+	struct timespec ts;
+	if (timespec_get(&ts, TIME_UTC) != TIME_UTC) {
+		warn("No UTC clock available, cannot timestamp the recording");
+		stream->wall_mono_offset_ns = 0;
+		return;
+	}
+
+	int64_t wall_ns = (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+	stream->wall_mono_offset_ns = wall_ns - (int64_t)os_gettime_ns();
+}
+
+/* When this frame actually shows up on screen, in wall clock terms. Reads
+   sys_dts_usec because obs-output.c rewrites dts_usec to make the output start
+   at zero. The pts/dts gap backs out B-frame reorder. */
+static int64_t video_packet_wall_ns(struct ffmpeg_muxer *stream, struct encoder_packet *pkt)
+{
+	if (!stream->wall_mono_offset_ns)
+		return 0;
+
+	int64_t mono_usec = pkt->sys_dts_usec;
+	if (pkt->timebase_den > 0)
+		mono_usec += (pkt->pts - pkt->dts) * 1000000LL / pkt->timebase_den;
+	return stream->wall_mono_offset_ns + mono_usec * 1000LL;
+}
+
+/* Tracks when the last frame leaves the screen. Max instead of newest, because
+   B-frames turn up out of display order. */
+static void latch_last_frame(struct ffmpeg_muxer *stream, struct encoder_packet *pkt)
+{
+	int64_t end_ns = video_packet_wall_ns(stream, pkt);
+	if (!end_ns)
+		return;
+
+	if (pkt->timebase_den > 0)
+		end_ns += (int64_t)pkt->timebase_num * 1000000000LL / pkt->timebase_den;
+
+	if (end_ns > stream->last_frame_wall_ns)
+		stream->last_frame_wall_ns = end_ns;
+}
+
 static void emit_recording_started(struct ffmpeg_muxer *stream, int code)
 {
 	signal_handler_t *sh = obs_output_get_signal_handler(stream->output);
 	calldata_t cd = {0};
 	calldata_set_string(&cd, "path", code == 0 ? stream->path.array : "");
 	calldata_set_int(&cd, "code", code);
+	calldata_set_int(&cd, "first_frame_wall_ns", code == 0 ? stream->first_frame_wall_ns : 0);
 	signal_handler_signal(sh, "recording_started", &cd);
 	calldata_free(&cd);
 }
@@ -1260,6 +1308,7 @@ static void emit_recording_stopped(struct ffmpeg_muxer *stream)
 	signal_handler_t *sh = obs_output_get_signal_handler(stream->output);
 	calldata_t cd = {0};
 	calldata_set_string(&cd, "path", stream->path.array);
+	calldata_set_int(&cd, "last_frame_wall_ns", stream->last_frame_wall_ns);
 	signal_handler_signal(sh, "recording_stopped", &cd);
 	calldata_free(&cd);
 }
@@ -1282,6 +1331,7 @@ static void drain_continuous_packets_to_pipe(struct ffmpeg_muxer *stream)
 
 		// Apply timestamp adjustments to buffered packets too
 		if (pkt.type == OBS_ENCODER_VIDEO) {
+			latch_last_frame(stream, &pkt);
 			pkt.dts -= stream->video_pts_offset;
 			pkt.pts -= stream->video_pts_offset;
 		} else {
@@ -1381,6 +1431,8 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 		return;
 	}
 
+	sample_wall_mono_offset(stream);
+
 	// Calculate how many packets to skip based on offset from END of buffer
 	size_t skip_packets = 0;
 
@@ -1393,34 +1445,48 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
   info("end_time %" PRId64 " usec, target_time %" PRId64 " usec (offset back %d seconds)",
       end_time, target_time, offset_seconds);
 
-  // Find the nearest keyframe to our target time
+  /* Last keyframe at or before the target. Snapping forward would eat the
+     caller's preroll, starting early just gives us a bit of extra head. */
   size_t best_keyframe_idx = 0;
-  int64_t best_time_diff = INT64_MAX;
+  size_t earliest_keyframe_idx = 0;
   bool found_keyframe = false;
+  bool found_earliest = false;
 
   for (size_t i = 0; i < num_packets; i++) {
     struct encoder_packet *pkt = deque_data(&stream->packets, i * size);
     bool video = pkt->type == OBS_ENCODER_VIDEO;
 
-    if (video && pkt->keyframe) {
-      int64_t time_diff = llabs((int64_t)pkt->dts_usec - target_time);
+    if (!video || !pkt->keyframe)
+      continue;
 
-      if (time_diff < best_time_diff) {
-        best_time_diff = time_diff;
-        best_keyframe_idx = i;
-        found_keyframe = true;
-      }
+    if (!found_earliest) {
+      earliest_keyframe_idx = i;
+      found_earliest = true;
     }
+
+    if ((int64_t)pkt->dts_usec <= target_time) {
+      best_keyframe_idx = i;
+      found_keyframe = true;
+    }
+  }
+
+  if (!found_keyframe && found_earliest) {
+    warn("No keyframe at or before target time, starting from the earliest one");
+    best_keyframe_idx = earliest_keyframe_idx;
+    found_keyframe = true;
   }
 
   if (found_keyframe) {
     skip_packets = best_keyframe_idx;
     struct encoder_packet *best_pkt = deque_data(&stream->packets, best_keyframe_idx * size);
-    info("Selected keyframe at packet %zu: DTS=%" PRId64 " (%.1f seconds from end)",
+    stream->first_frame_wall_ns = video_packet_wall_ns(stream, best_pkt);
+    info("Selected keyframe at packet %zu: DTS=%" PRId64 " (%.1f seconds from end), wall clock %" PRId64 " ns",
         best_keyframe_idx, best_pkt->dts_usec,
-        (double)(end_time - best_pkt->dts_usec) / 1000000.0);
+        (double)(end_time - best_pkt->dts_usec) / 1000000.0,
+        stream->first_frame_wall_ns);
   } else {
-    warn("No keyframes found after target time, starting from beginning");
+    warn("No keyframes found, starting from beginning");
+    stream->first_frame_wall_ns = 0;
   }
 
 	size_t packets_to_save = num_packets - skip_packets;
@@ -1438,6 +1504,7 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 	int64_t video_offset = 0;
 	int64_t audio_offsets[MAX_AUDIO_MIXES] = {0};
   ts_offset_clear(stream); // crucial else we might have stale offsets from a previous use
+  stream->last_frame_wall_ns = 0;
 
 	for (size_t i = skip_packets; i < num_packets; i++) {
 		struct encoder_packet *pkt;
@@ -1445,6 +1512,9 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 
 		bool video = pkt->type == OBS_ENCODER_VIDEO;
 		bool audio = pkt->type == OBS_ENCODER_AUDIO;
+
+		if (video)
+			latch_last_frame(stream, pkt);
 
 		if (video && !stream->found_video) {
 			stream->video_pts_offset = pkt->pts;
@@ -1697,6 +1767,7 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 
 		// Apply the same timestamp adjustments that were used in the replay portion
 		if (pkt.type == OBS_ENCODER_VIDEO) {
+			latch_last_frame(stream, &pkt);
 			pkt.dts -= stream->video_pts_offset;
 			pkt.pts -= stream->video_pts_offset;
 		} else {
