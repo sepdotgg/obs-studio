@@ -58,6 +58,7 @@ struct ffmpeg_muxer {
 	} replay_to_rec_state;
 
 	/* handy variables for timestamp adjustments */
+	bool await_keyframe;
 	bool found_video;
 	bool found_audio[MAX_AUDIO_MIXES];
 	int64_t video_pts_offset;

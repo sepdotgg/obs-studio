@@ -400,6 +400,7 @@ static void set_file_not_readable_error(struct ffmpeg_muxer *stream, obs_data_t 
 
 inline static void ts_offset_clear(struct ffmpeg_muxer *stream)
 {
+	stream->await_keyframe = false;
 	stream->found_video = false;
 	stream->video_pts_offset = 0;
 
@@ -1292,6 +1293,20 @@ static void latch_last_frame(struct ffmpeg_muxer *stream, struct encoder_packet 
 		stream->last_frame_wall_ns = end_ns;
 }
 
+/* True while the file still has no keyframe to open on. The keyframe that
+   ends the hold also pins first_frame_wall_ns. */
+static bool holding_for_keyframe(struct ffmpeg_muxer *stream, struct encoder_packet *pkt)
+{
+	if (!stream->await_keyframe)
+		return false;
+	if (pkt->type == OBS_ENCODER_VIDEO && pkt->keyframe) {
+		stream->await_keyframe = false;
+		stream->first_frame_wall_ns = video_packet_wall_ns(stream, pkt);
+		return false;
+	}
+	return true;
+}
+
 /* Streams missing from the convert snapshot latch their offset here. */
 static void rebase_packet(struct ffmpeg_muxer *stream, struct encoder_packet *pkt)
 {
@@ -1350,8 +1365,10 @@ static void drain_continuous_packets_to_pipe(struct ffmpeg_muxer *stream)
 		struct encoder_packet pkt;
 		deque_pop_front(&stream->continuous_packets, &pkt, sizeof(pkt));
 
-		rebase_packet(stream, &pkt);
-		write_packet(stream, &pkt);
+		if (!holding_for_keyframe(stream, &pkt)) {
+			rebase_packet(stream, &pkt);
+			write_packet(stream, &pkt);
+		}
 		obs_encoder_packet_release(&pkt);
 	}
 }
@@ -1444,6 +1461,8 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 	}
 
 	sample_wall_mono_offset(stream);
+	ts_offset_clear(stream); // crucial else we might have stale offsets from a previous use
+	stream->last_frame_wall_ns = 0;
 
 	// Calculate how many packets to skip based on offset from END of buffer
 	size_t skip_packets = 0;
@@ -1497,26 +1516,19 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
         (double)(end_time - best_pkt->dts_usec) / 1000000.0,
         stream->first_frame_wall_ns);
   } else {
-    warn("No keyframes found, starting from beginning");
+    warn("No keyframe in buffer, holding the file until the next one");
+    skip_packets = num_packets;
     stream->first_frame_wall_ns = 0;
+    stream->await_keyframe = true;
   }
 
 	size_t packets_to_save = num_packets - skip_packets;
-
-	if (packets_to_save == 0) {
-		warn("Offset too large, no packets to save");
-		emit_recording_started(stream, OBS_OUTPUT_ERROR);
-		return;
-	}
-
 	da_reserve(stream->mux_packets, packets_to_save);
 
 	/* ---------------------------- */
 	/* reorder packets */
 	int64_t video_offset = 0;
 	int64_t audio_offsets[MAX_AUDIO_MIXES] = {0};
-  ts_offset_clear(stream); // crucial else we might have stale offsets from a previous use
-  stream->last_frame_wall_ns = 0;
 
 	for (size_t i = skip_packets; i < num_packets; i++) {
 		struct encoder_packet *pkt;
@@ -1736,7 +1748,8 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 
 			drain_continuous_packets_to_pipe(stream);
 			stream->replay_to_rec_state = WRITING;
-			emit_recording_started(stream, 0);
+			if (!stream->await_keyframe)
+				emit_recording_started(stream, 0);
 		}
 		break;
 
@@ -1776,6 +1789,14 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 			deactivate_replay_buffer(stream, OBS_OUTPUT_ENCODE_ERROR);
 			return;
 		}
+
+		bool was_holding = stream->await_keyframe;
+		if (holding_for_keyframe(stream, &pkt)) {
+			obs_encoder_packet_release(&pkt);
+			break;
+		}
+		if (was_holding)
+			emit_recording_started(stream, 0);
 
 		rebase_packet(stream, &pkt);
 		if (!write_packet(stream, &pkt)) {
