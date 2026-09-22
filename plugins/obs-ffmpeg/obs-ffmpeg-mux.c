@@ -1292,6 +1292,27 @@ static void latch_last_frame(struct ffmpeg_muxer *stream, struct encoder_packet 
 		stream->last_frame_wall_ns = end_ns;
 }
 
+/* Streams missing from the convert snapshot latch their offset here. */
+static void rebase_packet(struct ffmpeg_muxer *stream, struct encoder_packet *pkt)
+{
+	if (pkt->type == OBS_ENCODER_VIDEO) {
+		latch_last_frame(stream, pkt);
+		if (!stream->found_video) {
+			stream->video_pts_offset = pkt->pts;
+			stream->found_video = true;
+		}
+		pkt->dts -= stream->video_pts_offset;
+		pkt->pts -= stream->video_pts_offset;
+	} else {
+		if (!stream->found_audio[pkt->track_idx]) {
+			stream->audio_dts_offsets[pkt->track_idx] = pkt->dts;
+			stream->found_audio[pkt->track_idx] = true;
+		}
+		pkt->dts -= stream->audio_dts_offsets[pkt->track_idx];
+		pkt->pts -= stream->audio_dts_offsets[pkt->track_idx];
+	}
+}
+
 static void emit_recording_started(struct ffmpeg_muxer *stream, int code)
 {
 	signal_handler_t *sh = obs_output_get_signal_handler(stream->output);
@@ -1329,16 +1350,7 @@ static void drain_continuous_packets_to_pipe(struct ffmpeg_muxer *stream)
 		struct encoder_packet pkt;
 		deque_pop_front(&stream->continuous_packets, &pkt, sizeof(pkt));
 
-		// Apply timestamp adjustments to buffered packets too
-		if (pkt.type == OBS_ENCODER_VIDEO) {
-			latch_last_frame(stream, &pkt);
-			pkt.dts -= stream->video_pts_offset;
-			pkt.pts -= stream->video_pts_offset;
-		} else {
-			pkt.dts -= stream->audio_dts_offsets[pkt.track_idx];
-			pkt.pts -= stream->audio_dts_offsets[pkt.track_idx];
-		}
-
+		rebase_packet(stream, &pkt);
 		write_packet(stream, &pkt);
 		obs_encoder_packet_release(&pkt);
 	}
@@ -1765,16 +1777,7 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 			return;
 		}
 
-		// Apply the same timestamp adjustments that were used in the replay portion
-		if (pkt.type == OBS_ENCODER_VIDEO) {
-			latch_last_frame(stream, &pkt);
-			pkt.dts -= stream->video_pts_offset;
-			pkt.pts -= stream->video_pts_offset;
-		} else {
-			pkt.dts -= stream->audio_dts_offsets[pkt.track_idx];
-			pkt.pts -= stream->audio_dts_offsets[pkt.track_idx];
-		}
-
+		rebase_packet(stream, &pkt);
 		if (!write_packet(stream, &pkt)) {
 			warn("Failed to write packet during continuous recording");
 			obs_encoder_packet_release(&pkt);
