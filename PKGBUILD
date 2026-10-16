@@ -7,7 +7,7 @@ arch=('x86_64')
 url="https://obsproject.com"
 license=('GPL-2.0-or-later')
 depends=(
-    'ffmpeg' 'jansson' 'libxinerama' 'libxkbcommon-x11' 'mbedtls' 'rnnoise'
+    'ffmpeg' 'jansson' 'libxinerama' 'libxkbcommon-x11' 'mbedtls3' 'rnnoise'
     'pciutils' 'qt6-svg' 'curl' 'jack' 'gtk-update-icon-cache' 'pipewire'
     'libxcomposite' 'libdatachannel' 'uthash' 'simde' 'qrcodegencpp-cmake'
 )
@@ -44,7 +44,13 @@ build() {
     export CXXFLAGS+=" -Wno-error=deprecated-declarations"
     # Avoid a host GLIBCXX since libstdc++ is not bundled.
     export LDFLAGS+=" -static-libstdc++"
+    # Arch's mbedtls is v4, OBS 32.0 needs the v3 compat package.
+    export PKG_CONFIG_PATH=/usr/lib/mbedtls3/pkgconfig
     cmake -S obs-studio -B build \
+        -DMbedTLS_INCLUDE_DIR=/usr/include/mbedtls3 \
+        -DMbedtls_LIBRARY=/usr/lib/mbedtls3/libmbedtls.so \
+        -DMbedcrypto_LIBRARY=/usr/lib/mbedtls3/libmbedcrypto.so \
+        -DMbedx509_LIBRARY=/usr/lib/mbedtls3/libmbedx509.so \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr \
         -DENABLE_BROWSER=OFF \

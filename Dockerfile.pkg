@@ -14,7 +14,7 @@ RUN pacman -Syu --noconfirm && pacman -S --noconfirm \
     jansson \
     curl \
     zlib \
-    mbedtls \
+    mbedtls3 \
     # Qt6
     qt6-base \
     qt6-svg \
