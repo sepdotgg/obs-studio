@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
+option(ENABLE_LINUX_CAPTURE "Enable X11 screen and window capture plugin" ON)
+if(NOT ENABLE_LINUX_CAPTURE)
+  target_disable(linux-capture)
+  return()
+endif()
+
 find_package(X11 REQUIRED)
 
 find_package(
