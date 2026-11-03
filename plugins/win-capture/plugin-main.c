@@ -28,6 +28,7 @@ extern struct obs_source_info window_capture_info;
 extern struct obs_source_info game_capture_info;
 
 static HANDLE init_hooks_thread = NULL;
+static SRWLOCK init_hooks_lock = SRWLOCK_INIT;
 static update_info_t *update_info = NULL;
 
 extern bool cached_versions_match(void);
@@ -63,16 +64,13 @@ static DWORD WINAPI init_hooks(LPVOID param)
 
 void wait_for_hook_initialization(void)
 {
-	static bool initialized = false;
-
-	if (!initialized) {
-		if (init_hooks_thread) {
-			WaitForSingleObject(init_hooks_thread, INFINITE);
-			CloseHandle(init_hooks_thread);
-			init_hooks_thread = NULL;
-		}
-		initialized = true;
+	AcquireSRWLockExclusive(&init_hooks_lock);
+	if (init_hooks_thread) {
+		WaitForSingleObject(init_hooks_thread, INFINITE);
+		CloseHandle(init_hooks_thread);
+		init_hooks_thread = NULL;
 	}
+	ReleaseSRWLockExclusive(&init_hooks_lock);
 }
 
 static bool confirm_compat_file(void *param, struct file_download_data *file)
@@ -157,5 +155,6 @@ void obs_module_unload(void)
 {
 	wait_for_hook_initialization();
 	update_info_destroy(update_info);
+	update_info = NULL;
 	compat_json_free();
 }

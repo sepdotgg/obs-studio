@@ -187,4 +187,5 @@ void compat_result_free(struct compat_result *res)
 void compat_json_free()
 {
 	json_decref(compat_entries);
+	compat_entries = NULL;
 }
