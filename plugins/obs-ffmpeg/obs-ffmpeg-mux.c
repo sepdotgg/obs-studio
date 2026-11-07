@@ -75,6 +75,8 @@ static inline void replay_buffer_clear(struct ffmpeg_muxer *stream)
 	stream->replay_to_rec = false;
 	stream->convert_offset_sec = 0;
 	stream->replay_to_rec_state = BUFFERING;
+	os_atomic_set_long(&stream->buffered_ms, 0);
+	os_atomic_set_long(&stream->buffered_mb, 0);
 }
 
 static void ffmpeg_mux_destroy(void *data)
@@ -1034,6 +1036,22 @@ static void get_last_replay(void *data, calldata_t *cd)
 		calldata_set_string(cd, "path", stream->path.array);
 }
 
+/* reports how many seconds of content are currently held in the replay buffer */
+static void get_buffer_duration_sec_proc(void *data, calldata_t *cd)
+{
+	struct ffmpeg_muxer *stream = data;
+	long ms = active(stream) ? os_atomic_load_long(&stream->buffered_ms) : 0;
+	calldata_set_int(cd, "seconds", ms / 1000);
+}
+
+/* reports how many megabytes of content are currently held in the replay buffer */
+static void get_buffer_size_mb_proc(void *data, calldata_t *cd)
+{
+	struct ffmpeg_muxer *stream = data;
+	long mb = active(stream) ? os_atomic_load_long(&stream->buffered_mb) : 0;
+	calldata_set_int(cd, "mb", mb);
+}
+
 static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 {
 	UNUSED_PARAMETER(settings);
@@ -1048,6 +1066,8 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 	proc_handler_add(ph, "void save()", save_replay_proc, stream);
 	proc_handler_add(ph, "void convert(int offset_seconds)", convert_replay_to_recording_with_offset_proc, stream);
 	proc_handler_add(ph, "void get_last_replay(out string path)", get_last_replay, stream);
+	proc_handler_add(ph, "void get_buffer_duration_sec(out int seconds)", get_buffer_duration_sec_proc, stream);
+	proc_handler_add(ph, "void get_buffer_size_mb(out int mb)", get_buffer_size_mb_proc, stream);
 
 	signal_handler_t *sh = obs_output_get_signal_handler(output);
 	signal_handler_add(sh, "void saved()");
@@ -1426,6 +1446,12 @@ static void replay_to_recording_save_with_offset(struct ffmpeg_muxer *stream, in
 	info("State is now: CONVERTING");
 	stream->replay_to_rec_state = CONVERTING;
 
+	// The in-memory buffer is no longer being filled once we start
+	// converting, so report 0 to get_buffer_duration_sec/get_buffer_size_mb until we're BUFFERING
+	// again (only the BUFFERING path in replay_buffer_data updates these).
+	os_atomic_set_long(&stream->buffered_ms, 0);
+	os_atomic_set_long(&stream->buffered_mb, 0);
+
 	stream->mux_thread_joinable =
 		pthread_create(&stream->mux_thread, NULL, replay_to_recording_mux_thread, stream) == 0;
 
@@ -1573,6 +1599,18 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 
 		if (packet->type == OBS_ENCODER_VIDEO && packet->keyframe)
 			stream->keyframes++;
+
+		// cur_time is the dts of the oldest packet still in the buffer
+		// (kept up to date by replay_buffer_purge), so this is the span
+		// of content currently held in memory.
+		os_atomic_set_long(
+      &stream->buffered_ms, 
+      (long)((pkt.dts_usec - stream->cur_time) / 1000)
+    );
+
+		// cur_size is the total size in bytes of packets currently held
+		// in memory (also kept up to date by replay_buffer_purge).
+		os_atomic_set_long(&stream->buffered_mb, (long)(stream->cur_size / (1024 * 1024)));
 
 		// Check for save trigger
 		if (stream->save_ts && packet->sys_dts_usec >= stream->save_ts) {
